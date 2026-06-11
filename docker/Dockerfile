@@ -69,20 +69,22 @@ RUN set -e; \
 FROM node:22-alpine AS builder
 WORKDIR /usr/src/app
 COPY --from=source /src .
-# Disable pnpm's `verify-deps-before-run` recheck for the `pnpm build`
-# step. Without this, pnpm re-runs `pnpm install` as a subprocess before
-# scripts — and that subprocess does NOT inherit our outer CLI
-# --config.* flags, so it re-hits the trust-policy error even after the
-# outer install satisfied everything. We control the install state in
-# this stage; the recheck is redundant and only blocks the build.
-ENV NPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false
+# We invoke nuxt directly via `pnpm exec` instead of `pnpm build`.
+# Reason: `pnpm <script-name>` (e.g. `pnpm build`) runs pnpm's
+# `runDepsStatusCheck` before the script, which spawns a fresh
+# `pnpm install` subprocess. That subprocess inherits our env but
+# NOT our outer CLI --config flags, so it re-hits the trust-policy
+# error even though the outer install already satisfied everything.
+# `NPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false` doesn't suppress it
+# under that name in pnpm 11. `pnpm exec` runs a binary directly
+# without the script-runner wrapping, so the recheck is bypassed.
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     corepack enable && \
     corepack prepare pnpm@latest --activate && \
     pnpm install --no-frozen-lockfile \
         --config.trustPolicy=permissive \
         --config.dangerouslyAllowAllBuilds=true && \
-    pnpm build
+    pnpm exec nuxt build
 
 # Stage 3: minimal runtime. Nitro output is fully self-contained — we only
 # need node and the .output/ tree.
