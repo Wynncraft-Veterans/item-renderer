@@ -1,0 +1,198 @@
+diff --git a/app/lib/wynntils/rolled-to-card.ts b/app/lib/wynntils/rolled-to-card.ts
+new file mode 100644
+index 0000000..67ead24
+--- /dev/null
++++ b/app/lib/wynntils/rolled-to-card.ts
+@@ -0,0 +1,113 @@
++/**
++ * Adapter: turn a PUA-decoded item (parseIdString blocks) plus the matched
++ * base SearchItem into the structured `ItemMeta` props that
++ * `app/components/OgImage/ItemCard.takumi.vue` already accepts.
++ *
++ * The strategy is to reuse `extractItemMeta(baseItem)` for everything the
++ * base item carries (tier, icon, lore, defence, dps, sp, ...), then
++ * override `idRows` with rolled values + roll-percent colors derived from
++ * the decoded identifications. Powders, shiny, reroll count are not
++ * surfaced today — `ItemCard.takumi.vue`'s `powderSlots` is the slot
++ * count (which is a base-item property), not the filled count.
++ */
++
++import type { Block } from './decode'
++import type { ItemMeta, IdRow } from '~/lib/items/item-meta'
++import type { SearchItem } from '~/lib/items-search/types'
++import { humanizeField, isInverted } from '~/lib/data/identifications'
++import { extractItemMeta } from '~/lib/items/item-meta'
++import { ID_BAD_COLOR, ID_GOOD_COLOR, idIsGood } from '~/lib/items/tooltip'
++import { rollPercent } from './roll-percent'
++
++// Wynncraft / Minecraft chat-colour palette for roll-percent tiers.
++// Mirrors roll-percent.ts's CSS-var ladder (red / gold / yellow / green /
++// aqua) — Takumi can't resolve CSS vars, so we inline hex.
++const ROLL_RED = '#FF5555'
++const ROLL_GOLD = '#FFAA00'
++const ROLL_YELLOW = '#FFFF55'
++const ROLL_GREEN = '#55FF55'
++const ROLL_AQUA = '#55FFFF'
++
++function rollPctToHex(pct: number | null, isGood: boolean): string {
++  if (pct == null)
++    return isGood ? ID_GOOD_COLOR : ID_BAD_COLOR
++  if (pct < 20)
++    return ROLL_RED
++  if (pct < 50)
++    return ROLL_GOLD
++  if (pct < 80)
++    return ROLL_YELLOW
++  if (pct < 100)
++    return ROLL_GREEN
++  return ROLL_AQUA
++}
++
++function findNameBlock(blocks: Block[]): string | null {
++  for (const b of blocks) {
++    if (b.name === 'NameData')
++      return b.nameStr
++  }
++  return null
++}
++
++function findIdentBlock(blocks: Block[]) {
++  for (const b of blocks) {
++    if (b.name === 'IdentificationData')
++      return b
++  }
++  return null
++}
++
++/**
++ * Combine base-item display data with rolled identifications.
++ *
++ * @param baseItem  The SearchItem matched against the decoded NameData.
++ * @param blocks    The full Block[] from parseIdString.
++ * @param idKeys    Stat-id-byte → v3 API name map (from getIdKeys()).
++ */
++export function extractRolledMeta(
++  baseItem: SearchItem,
++  blocks: Block[],
++  idKeys: Map<number, string>,
++): ItemMeta {
++  const baseMeta = extractItemMeta(baseItem)
++
++  const identBlock = findIdentBlock(blocks)
++  if (!identBlock)
++    return baseMeta
++
++  const rolledRows: IdRow[] = []
++  for (const ent of identBlock.identifications) {
++    // Skip preid (unidentified) entries — they have no roll yet.
++    if (typeof ent.roll !== 'number')
++      continue
++    const v3Name = idKeys.get(ent.kind)
++    if (!v3Name)
++      continue
++    const range = baseItem.identifications[v3Name]
++    if (!range)
++      continue
++
++    const { label, unit } = humanizeField(v3Name)
++    const inverted = isInverted(v3Name)
++    const lo = Math.min(range.min, range.max)
++    const hi = Math.max(range.min, range.max)
++    const actual = Math.max(
++      lo,
++      Math.min(hi, Math.round(range.raw * (ent.roll / 100))),
++    )
++    const pct = rollPercent(actual, range)
++    const sign = actual > 0 ? '+' : ''
++    const valueText = `${sign}${actual}${unit}`
++    const pctText = pct == null ? '' : ` [${pct.toFixed(1)}%]`
++
++    rolledRows.push({
++      label,
++      left: '',
++      right: `${valueText}${pctText}`,
++      color: rollPctToHex(pct, idIsGood(actual, inverted)),
++    })
++  }
++
++  return { ...baseMeta, idRows: rolledRows }
++}
+diff --git a/server/api/_og/pua/[encoded].get.ts b/server/api/_og/pua/[encoded].get.ts
+new file mode 100644
+index 0000000..1d42a7e
+--- /dev/null
++++ b/server/api/_og/pua/[encoded].get.ts
+@@ -0,0 +1,73 @@
++/**
++ * PUA-encoded item OG image route.
++ *
++ * Mirrors `server/api/_og/item/[slug].get.ts` but takes a PUA-encoded
++ * item string (Wynntils' private-use-area item-share format) instead of
++ * a base-item slug. Renders the same `ItemCard` OG component with the
++ * rolled identification values from the decoded item.
++ *
++ * Used by the Wynncraft Veterans "nazbot" Discord bridge to attach an
++ * item-card image when a guild chat message contains a PUA-encoded item.
++ */
++
++import { Buffer } from 'node:buffer'
++import { createCdnClient } from '~/lib/data/cdn-client'
++import { loadSearchData } from '~/lib/items-search/load-search-data'
++import { buildSlugIndex, resolveSlug } from '~/lib/items-search/slug'
++import { parseIdString } from '~/lib/wynntils/decode'
++import { getIdKeys } from '~/lib/wynntils/id-keys'
++import { extractRolledMeta } from '~/lib/wynntils/rolled-to-card'
++import type { SearchItem } from '~/lib/items-search/types'
++
++function slugify(name: string): string {
++  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
++}
++
++// Module-level cache: items rarely change; re-fetch only when gameVersion
++// changes. Mirrors the [slug].get.ts route.
++let itemCache: { gameVersion: string, index: Map<string, SearchItem[]> } | null = null
++
++export default defineEventHandler(async (event) => {
++  const encoded = getRouterParam(event, 'encoded')
++  if (!encoded)
++    throw createError({ statusCode: 400, statusMessage: 'Missing encoded parameter' })
++
++  let blocks
++  try {
++    blocks = parseIdString(encoded)
++  }
++  catch (err) {
++    throw createError({ statusCode: 400, statusMessage: `Decode failed: ${(err as Error).message}` })
++  }
++
++  // Pull the item name out of the decoded blocks.
++  let nameStr: string | null = null
++  for (const b of blocks) {
++    if (b.name === 'NameData') {
++      nameStr = b.nameStr
++      break
++    }
++  }
++  if (!nameStr)
++    throw createError({ statusCode: 422, statusMessage: 'No NameData block in encoded item' })
++
++  const config = useRuntimeConfig()
++  const client = createCdnClient(config.public.cdnBaseUrl)
++
++  if (!itemCache) {
++    const data = await loadSearchData(client)
++    itemCache = { gameVersion: data.gameVersion, index: buildSlugIndex(data.items) }
++  }
++
++  const baseItem = resolveSlug(itemCache.index, slugify(nameStr), nameStr)
++  if (!baseItem)
++    throw createError({ statusCode: 404, statusMessage: `Unknown item: ${nameStr}` })
++
++  const idKeys = await getIdKeys()
++  const itemMeta = extractRolledMeta(baseItem, blocks, idKeys)
++  const ogPath = buildOgImagePath('ItemCard', itemMeta as Record<string, unknown>, `/items/${slugify(nameStr)}`)
++  const data = await $fetch<ArrayBuffer>(ogPath, { responseType: 'arrayBuffer' })
++
++  setResponseHeader(event, 'content-type', 'image/png')
++  return Buffer.from(data)
++})
