@@ -69,6 +69,13 @@ RUN set -e; \
 FROM node:22-alpine AS builder
 WORKDIR /usr/src/app
 COPY --from=source /src .
+# Disable pnpm's `verify-deps-before-run` recheck for the `pnpm build`
+# step. Without this, pnpm re-runs `pnpm install` as a subprocess before
+# scripts — and that subprocess does NOT inherit our outer CLI
+# --config.* flags, so it re-hits the trust-policy error even after the
+# outer install satisfied everything. We control the install state in
+# this stage; the recheck is redundant and only blocks the build.
+ENV NPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     corepack enable && \
     corepack prepare pnpm@latest --activate && \
