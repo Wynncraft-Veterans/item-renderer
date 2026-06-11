@@ -1,0 +1,18 @@
+# --- Editors / OS ---
+/.idea
+/.vscode
+.DS_Store
+Thumbs.db
+
+# --- Local scratch ---
+/.temp/
+
+# --- Claude Code state (local-only; not tracked) ---
+/.claude/
+
+# --- Node / Nuxt artifacts (in case anyone runs upstream locally here) ---
+node_modules/
+.nuxt/
+.output/
+.data/
+*.log

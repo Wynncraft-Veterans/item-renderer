@@ -1,0 +1,58 @@
+# Nightly: build the patch overlay against upstream wynn-tools/wynn.tools HEAD.
+#
+# Failure signals one of:
+#  - Our patches no longer apply (upstream refactored a file we touch).
+#  - The patched source no longer builds (upstream API change).
+#  - Upstream's pnpm version bumped past what corepack ships.
+#
+# When this fails, look at the job log, then either:
+#  - Regenerate the affected patch against current upstream and commit, or
+#  - Pin WYNN_TOOLS_REF in docker/Dockerfile to the last-good upstream
+#    commit and open an issue to address the divergence on a longer
+#    timeline.
+name: upstream-smoke
+
+on:
+  schedule:
+    # 06:00 UTC every Sunday. wynn.tools is high-velocity, but the PUA
+    # renderer's correctness has graceful degradation: when a render
+    # fails, temporary-server falls back to posting the raw PUA text
+    # (status quo). So a weekly cadence is plenty — we catch upstream
+    # breakage within ~7 days at 7× less CI cost than daily. Compare to
+    # auth-stack's daily smoke, which is justified by Minecraft client
+    # churn + the hard "players can't connect" failure mode that doesn't
+    # apply here.
+    #
+    # CAVEAT: GitHub disables scheduled workflows after 60 days of zero
+    # repository activity (any push counts). If the smoke goes silent in
+    # a quiet period, push any change to re-enable, or trigger manually
+    # via workflow_dispatch below.
+    - cron: "0 6 * * 0"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream ref to build against (default: master)"
+        required: false
+        default: "master"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build with WYNN_TOOLS_REF=${{ inputs.ref || 'master' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          load: true
+          tags: item-renderer:upstream-smoke
+          build-args: |
+            WYNN_TOOLS_REF=${{ inputs.ref || 'master' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,16 @@
+# Local-dev compose: build and run the patched item-renderer against an
+# arbitrary upstream ref. NOT used in production — vets-deploy's
+# stacks/item-renderer/docker-compose.yml is what runs on the VPS.
+services:
+  item-renderer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        WYNN_TOOLS_REF: ${WYNN_TOOLS_REF:-fe8e535eebd7da8d284b4fc0c7ce32b6b0f56fd6}
+    image: item-renderer:local
+    ports:
+      - "3000:3000"
+    environment:
+      # CDN base for item metadata, icons, frames. Upstream default.
+      NUXT_PUBLIC_CDN_BASE_URL: ${CDN_BASE_URL:-https://cdn.wynn.tools/}

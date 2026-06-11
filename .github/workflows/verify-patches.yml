@@ -1,0 +1,60 @@
+# PR/push gate: build the patch overlay against the pinned WYNN_TOOLS_REF.
+# This catches patch-application breakage and build errors at PR time,
+# before they hit master. On master pushes, the resulting image is also
+# published to ghcr.io/wynncraft-veterans/item-renderer so the production
+# VPS pulls a prebuilt image instead of running pnpm install on a 2GB box.
+#
+# Image tag = the short form of the Dockerfile's ARG WYNN_TOOLS_REF default.
+# Mutable: each master push re-tags the same `:<short-sha>` so Watchtower
+# on the VPS picks it up at 04:00. Upstream wynn.tools has no tagged
+# releases, so we pin to full commit SHAs.
+name: verify-patches
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag from Dockerfile default
+        id: tag
+        run: |
+          ref=$(awk -F'=' '/^ARG WYNN_TOOLS_REF=/{print $2; exit}' docker/Dockerfile)
+          # If the ref looks like a 40-char SHA, use the short form.
+          # Otherwise (branch, tag) keep it as-is.
+          if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            tag=${ref:0:7}
+          else
+            tag=$ref
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on master)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
+          tags: ghcr.io/wynncraft-veterans/item-renderer:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
