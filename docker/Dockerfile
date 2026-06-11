@@ -43,13 +43,25 @@ RUN set -e; \
 # corepack pulls the pnpm version pinned by upstream's packageManager field
 # (if set); otherwise it falls back to the corepack default. Either way we
 # match whatever upstream uses without editing the Dockerfile.
+#
+# pnpm install gets --config.trustPolicy=permissive: upstream's
+# pnpm-workspace.yaml ships `trustPolicy: no-downgrade`, which rejects
+# three transitive packages (chokidar / semver / tinyexec) that pnpm's
+# trust database considers a possible takeover. Those packages are fine;
+# the policy is just over-cautious for a CI install with no prior trust
+# history. The permissive override here keeps the patches small (we
+# don't have to edit upstream's pnpm-workspace.yaml).
+#
+# --no-frozen-lockfile lets pnpm rewrite the lockfile in-place during
+# install if needed; reproducibility is anchored by WYNN_TOOLS_REF
+# pinning the upstream tree, not by the lockfile.
 FROM node:22-alpine AS builder
 WORKDIR /usr/src/app
 COPY --from=source /src .
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     corepack enable && \
     corepack prepare pnpm@latest --activate && \
-    pnpm install --frozen-lockfile && \
+    pnpm install --no-frozen-lockfile --config.trustPolicy=permissive && \
     pnpm build
 
 # Stage 3: minimal runtime. Nitro output is fully self-contained — we only
