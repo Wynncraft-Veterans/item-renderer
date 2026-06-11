@@ -44,24 +44,37 @@ RUN set -e; \
 # (if set); otherwise it falls back to the corepack default. Either way we
 # match whatever upstream uses without editing the Dockerfile.
 #
-# pnpm install gets --config.trustPolicy=permissive: upstream's
-# pnpm-workspace.yaml ships `trustPolicy: no-downgrade`, which rejects
-# three transitive packages (chokidar / semver / tinyexec) that pnpm's
-# trust database considers a possible takeover. Those packages are fine;
-# the policy is just over-cautious for a CI install with no prior trust
-# history. The permissive override here keeps the patches small (we
-# don't have to edit upstream's pnpm-workspace.yaml).
+# pnpm install gets three overrides to make a CI build go through:
 #
-# --no-frozen-lockfile lets pnpm rewrite the lockfile in-place during
-# install if needed; reproducibility is anchored by WYNN_TOOLS_REF
-# pinning the upstream tree, not by the lockfile.
+#   --config.trustPolicy=permissive
+#     Upstream's pnpm-workspace.yaml ships `trustPolicy: no-downgrade`,
+#     which rejects three transitive packages (chokidar / semver /
+#     tinyexec) that pnpm's trust database considers a possible
+#     takeover. Those packages are fine; the policy is over-cautious
+#     for a fresh CI install with no prior trust history.
+#
+#   --config.dangerouslyAllowAllBuilds=true
+#     pnpm 10+ blocks dependency postinstall scripts by default
+#     (esbuild's native-binary install, @parcel/watcher, vue-demi,
+#     unrs-resolver). Without these the subsequent `pnpm build` fails
+#     because esbuild has no platform binary. Override allows them all.
+#
+#   --no-frozen-lockfile
+#     Lets pnpm rewrite the lockfile in-place if upstream nudges it;
+#     reproducibility is anchored by WYNN_TOOLS_REF pinning the
+#     upstream tree, not by the lockfile.
+#
+# All three overrides keep the patches small — we don't have to edit
+# upstream's pnpm-workspace.yaml or package.json.
 FROM node:22-alpine AS builder
 WORKDIR /usr/src/app
 COPY --from=source /src .
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     corepack enable && \
     corepack prepare pnpm@latest --activate && \
-    pnpm install --no-frozen-lockfile --config.trustPolicy=permissive && \
+    pnpm install --no-frozen-lockfile \
+        --config.trustPolicy=permissive \
+        --config.dangerouslyAllowAllBuilds=true && \
     pnpm build
 
 # Stage 3: minimal runtime. Nitro output is fully self-contained — we only
