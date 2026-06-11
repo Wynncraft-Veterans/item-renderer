@@ -1,18 +1,18 @@
 # PR/push gate: build the patch overlay against the pinned WYNN_TOOLS_REF.
 # This catches patch-application breakage and build errors at PR time,
-# before they hit master. On master pushes, the resulting image is also
+# before they hit main. On main pushes, the resulting image is also
 # published to ghcr.io/wynncraft-veterans/item-renderer so the production
 # VPS pulls a prebuilt image instead of running pnpm install on a 2GB box.
 #
 # Image tag = the short form of the Dockerfile's ARG WYNN_TOOLS_REF default.
-# Mutable: each master push re-tags the same `:<short-sha>` so Watchtower
+# Mutable: each main push re-tags the same `:<short-sha>` so Watchtower
 # on the VPS picks it up at 04:00. Upstream wynn.tools has no tagged
 # releases, so we pin to full commit SHAs.
 name: verify-patches
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
 
 jobs:
@@ -41,20 +41,20 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build (and push on master)
+      - name: Build (and push on main)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
-          load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
           tags: ghcr.io/wynncraft-veterans/item-renderer:${{ steps.tag.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -10,7 +10,7 @@
 #   docker build -t item-renderer:local -f docker/Dockerfile .
 #
 # Build against upstream HEAD (nightly smoke / opt-in):
-#   docker build --build-arg WYNN_TOOLS_REF=master \
+#   docker build --build-arg WYNN_TOOLS_REF=main \
 #                -t item-renderer:nightly -f docker/Dockerfile .
 #
 # Bump the pinned ref by editing WYNN_TOOLS_REF below (or pass it from

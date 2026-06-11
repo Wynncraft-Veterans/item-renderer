@@ -64,7 +64,7 @@ docker compose up --build
 There is no manual sync. The Dockerfile clones at `WYNN_TOOLS_REF`;
 bumping that var (in `docker/Dockerfile` or via build-arg) is the entire
 upgrade process. CI's `upstream-smoke` workflow rebuilds **weekly**
-(Sunday 06:00 UTC) against `WYNN_TOOLS_REF=master` and fails if patches
+(Sunday 06:00 UTC) against `WYNN_TOOLS_REF=main` and fails if patches
 no longer apply or the build no longer compiles — that is the
 early-warning signal.
 

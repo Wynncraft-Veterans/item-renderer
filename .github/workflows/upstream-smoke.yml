@@ -31,9 +31,9 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Upstream ref to build against (default: master)"
+        description: "Upstream ref to build against (default: main)"
         required: false
-        default: "master"
+        default: "main"
 
 jobs:
   build:
@@ -44,7 +44,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build with WYNN_TOOLS_REF=${{ inputs.ref || 'master' }}
+      - name: Build with WYNN_TOOLS_REF=${{ inputs.ref || 'main' }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -53,6 +53,6 @@ jobs:
           load: true
           tags: item-renderer:upstream-smoke
           build-args: |
-            WYNN_TOOLS_REF=${{ inputs.ref || 'master' }}
+            WYNN_TOOLS_REF=${{ inputs.ref || 'main' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
