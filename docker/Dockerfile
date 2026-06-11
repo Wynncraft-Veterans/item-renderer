@@ -40,51 +40,28 @@ RUN set -e; \
     fi
 
 # Stage 2: build the patched Nuxt server.
-# corepack pulls the pnpm version pinned by upstream's packageManager field
-# (if set); otherwise it falls back to the corepack default. Either way we
-# match whatever upstream uses without editing the Dockerfile.
+# corepack pulls the pnpm version pinned by upstream's packageManager
+# field (if set); otherwise it falls back to the corepack default.
 #
-# pnpm install gets three overrides to make a CI build go through:
+# The `pnpm install` flags are minimal because the two policy knobs
+# (`trustPolicy: permissive` and `dangerouslyAllowAllBuilds: true`)
+# live in upstream's `pnpm-workspace.yaml` via patch 0002. Runtime
+# CLI overrides were tried first; they work for the outer install but
+# don't propagate to the recursive `pnpm install` that pnpm 11 spawns
+# from `runDepsStatusCheck` before any script or `pnpm exec`. Putting
+# the knobs in the workspace yaml is the only path the recursive
+# install honors.
 #
-#   --config.trustPolicy=permissive
-#     Upstream's pnpm-workspace.yaml ships `trustPolicy: no-downgrade`,
-#     which rejects three transitive packages (chokidar / semver /
-#     tinyexec) that pnpm's trust database considers a possible
-#     takeover. Those packages are fine; the policy is over-cautious
-#     for a fresh CI install with no prior trust history.
-#
-#   --config.dangerouslyAllowAllBuilds=true
-#     pnpm 10+ blocks dependency postinstall scripts by default
-#     (esbuild's native-binary install, @parcel/watcher, vue-demi,
-#     unrs-resolver). Without these the subsequent `pnpm build` fails
-#     because esbuild has no platform binary. Override allows them all.
-#
-#   --no-frozen-lockfile
-#     Lets pnpm rewrite the lockfile in-place if upstream nudges it;
-#     reproducibility is anchored by WYNN_TOOLS_REF pinning the
-#     upstream tree, not by the lockfile.
-#
-# All three overrides keep the patches small — we don't have to edit
-# upstream's pnpm-workspace.yaml or package.json.
+# --no-frozen-lockfile is kept: reproducibility is anchored by
+# WYNN_TOOLS_REF pinning the upstream tree, not by the lockfile.
 FROM node:22-alpine AS builder
 WORKDIR /usr/src/app
 COPY --from=source /src .
-# We invoke nuxt directly via `pnpm exec` instead of `pnpm build`.
-# Reason: `pnpm <script-name>` (e.g. `pnpm build`) runs pnpm's
-# `runDepsStatusCheck` before the script, which spawns a fresh
-# `pnpm install` subprocess. That subprocess inherits our env but
-# NOT our outer CLI --config flags, so it re-hits the trust-policy
-# error even though the outer install already satisfied everything.
-# `NPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false` doesn't suppress it
-# under that name in pnpm 11. `pnpm exec` runs a binary directly
-# without the script-runner wrapping, so the recheck is bypassed.
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     corepack enable && \
     corepack prepare pnpm@latest --activate && \
-    pnpm install --no-frozen-lockfile \
-        --config.trustPolicy=permissive \
-        --config.dangerouslyAllowAllBuilds=true && \
-    pnpm exec nuxt build
+    pnpm install --no-frozen-lockfile && \
+    pnpm build
 
 # Stage 3: minimal runtime. Nitro output is fully self-contained — we only
 # need node and the .output/ tree.

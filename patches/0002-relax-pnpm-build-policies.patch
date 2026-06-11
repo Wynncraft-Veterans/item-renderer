@@ -1,0 +1,14 @@
+diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
+index 6d4d7ec..fffef37 100644
+--- a/pnpm-workspace.yaml
++++ b/pnpm-workspace.yaml
+@@ -1,6 +1,8 @@
+ shellEmulator: true
+ 
+-trustPolicy: no-downgrade
++trustPolicy: permissive
++
++dangerouslyAllowAllBuilds: true
+ 
+ packages:
+   - .
