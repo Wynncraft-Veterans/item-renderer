@@ -1,0 +1,124 @@
+diff --git a/app/lib/wynntils/best-effort-name.ts b/app/lib/wynntils/best-effort-name.ts
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/app/lib/wynntils/best-effort-name.ts
+@@ -0,0 +1,91 @@
++/**
++ * Best-effort item-name/type extractor for PUA-encoded items whose full
++ * decode fails.
++ *
++ * `parseIdString` throws on unhandled block IDs (upstream currently
++ * covers 0-6 + EndData; blocks 7-15 for crafted-item metadata all
++ * trigger `Unhandled block id`). Crafted Scroll in particular carries
++ * block 13 (CraftedConsumableTypeData) at byte 4, so the strict
++ * decoder aborts before ever reaching a NameData block.
++ *
++ * This walker reads the byte stream itself and surfaces:
++ *   - NameData (id=2)  → the decoded name string.
++ *   - CraftedConsumableTypeData (id=13) → a synthetic name like
++ *     "Crafted Scroll" based on the 1-byte type ID.
++ *
++ * Anything else (unknown block, malformed varint, EOF) stops the walk
++ * and returns whatever was found so far, or null. Never throws.
++ *
++ * Called from the pua route's `parseIdString` catch block. When
++ * upstream adds decoders for blocks 7-15 the strict decoder succeeds
++ * and this walker never runs — no upstream conflict.
++ */
++
++import { decodeString } from './decode'
++
++// Wynntils ConsumableType encoding IDs — mirrors
++// Wynntils/common/…/models/gear/type/ConsumableType.java.
++const CRAFTED_CONSUMABLE_NAMES: Record<number, string> = {
++  0: 'Crafted Potion',
++  1: 'Crafted Food',
++  2: 'Crafted Scroll',
++  3: 'Crafted Consumable',
++}
++
++export function extractItemNameBestEffort(idstr: string): string | null {
++  let bytes: number[]
++  try {
++    bytes = decodeString(idstr)
++  }
++  catch {
++    return null
++  }
++
++  let i = 0
++  const next = (): number | null => {
++    if (i >= bytes.length) return null
++    return bytes[i++]
++  }
++
++  if (next() !== 0) return null // StartData
++  if (next() === null) return null // version byte
++
++  let craftedFallback: string | null = null
++
++  while (true) {
++    const id = next()
++    if (id === null || id === 0xFF) return craftedFallback
++
++    if (id === 1) {
++      if (next() === null) return craftedFallback // TypeData: 1-byte itemType
++      continue
++    }
++
++    if (id === 2) {
++      const nameBytes: number[] = []
++      while (true) {
++        const b = next()
++        if (b === null) return craftedFallback
++        if (b === 0) break
++        nameBytes.push(b)
++      }
++      try {
++        return new TextDecoder().decode(new Uint8Array(nameBytes))
++      }
++      catch {
++        return craftedFallback
++      }
++    }
++
++    if (id === 13) {
++      const typeId = next()
++      if (typeId === null) return craftedFallback
++      if (!craftedFallback) craftedFallback = CRAFTED_CONSUMABLE_NAMES[typeId] ?? 'Crafted Consumable'
++      continue
++    }
++
++    // Any other block ID: unknown length, can't safely skip. Bail with
++    // whatever fallback name we've collected so far.
++    return craftedFallback
++  }
++}
+diff --git a/server/api/_og/pua/[encoded].get.ts b/server/api/_og/pua/[encoded].get.ts
+index 1d42a7e..2222222 100644
+--- a/server/api/_og/pua/[encoded].get.ts
++++ b/server/api/_og/pua/[encoded].get.ts
+@@ -17,6 +17,7 @@ import { buildSlugIndex, resolveSlug } from '~/lib/items-search/slug'
+ import { parseIdString } from '~/lib/wynntils/decode'
+ import { getIdKeys } from '~/lib/wynntils/id-keys'
+ import { extractRolledMeta } from '~/lib/wynntils/rolled-to-card'
++import { extractItemNameBestEffort } from '~/lib/wynntils/best-effort-name'
+ import type { SearchItem } from '~/lib/items-search/types'
+ 
+ function slugify(name: string): string {
+@@ -37,6 +38,14 @@ export default defineEventHandler(async (event) => {
+     blocks = parseIdString(encoded)
+   }
+   catch (err) {
++    // Strict decoder throws on unhandled block IDs (crafted-item blocks
++    // 7-15 in particular). Try a lax walker that surfaces just the item
++    // name or crafted type, so the temporary-server bridge can still
++    // format a "__**Name**__ (`<pua>`)" fallback line for Discord.
++    const fallbackName = extractItemNameBestEffort(encoded)
++    if (fallbackName) {
++      throw createError({ statusCode: 404, statusMessage: `Unknown item: ${fallbackName}` })
++    }
+     throw createError({ statusCode: 400, statusMessage: `Decode failed: ${(err as Error).message}` })
+   }
+ 
