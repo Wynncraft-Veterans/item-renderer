@@ -32,9 +32,16 @@ COPY patches/ /patches/
 RUN set -e; \
     if ls /patches/*.patch >/dev/null 2>&1; then \
         echo "Applying patches against ${WYNN_TOOLS_REF}:"; \
-        ls /patches/*.patch; \
-        git apply --check /patches/*.patch; \
-        git apply /patches/*.patch; \
+        # Sequential check-then-apply so a later patch can modify files created
+        # by an earlier one.  `git apply --check /patches/*.patch` (all at once)
+        # verifies against the pre-patch working tree without staging, so a
+        # patch that touches an earlier-patch-created file fails the check even
+        # though the actual apply would succeed.
+        for p in /patches/*.patch; do \
+            echo "  $p"; \
+            git apply --check "$p"; \
+            git apply "$p"; \
+        done; \
     else \
         echo "No patches found in /patches/ — building unpatched upstream."; \
     fi
