@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..67ead24
 --- /dev/null
 +++ b/app/lib/wynntils/rolled-to-card.ts
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,119 @@
 +/**
 + * Adapter: turn a PUA-decoded item (parseIdString blocks) plus the matched
 + * base SearchItem into the structured `ItemMeta` props that
@@ -115,7 +115,13 @@ index 0000000..67ead24
 +    })
 +  }
 +
-+  return { ...baseMeta, idRows: rolledRows }
++  // Override baseMeta.name (which uses displayName) with the full item
++  // name so masterwork variants are visually distinct from their base
++  // items on the rendered card. displayName is shared across variants
++  // (e.g. both "Idol" and "Masterwork Idol" have displayName "Idol"),
++  // so the Wynntils encoder-side masterwork prefix is the only signal
++  // that survives to Discord.
++  return { ...baseMeta, name: baseItem.name, idRows: rolledRows }
 +}
 diff --git a/server/api/_og/pua/[encoded].get.ts b/server/api/_og/pua/[encoded].get.ts
 new file mode 100644
