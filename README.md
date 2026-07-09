@@ -61,38 +61,64 @@ docker compose up --build
 
 ## Tracking upstream
 
-There is no manual sync. The Dockerfile clones at `WYNN_TOOLS_REF`;
-bumping that var (in `docker/Dockerfile` or via build-arg) is the entire
-upgrade process. CI's `upstream-smoke` workflow rebuilds **weekly**
-(Sunday 06:00 UTC) against `WYNN_TOOLS_REF=main` and fails if patches
-no longer apply or the build no longer compiles — that is the
-early-warning signal.
+Automatic. The `upstream-track` workflow runs daily at 06:00 UTC (and
+on every main push), queries `https://api.github.com/repos/wynn-tools/wynn.tools/commits/main`
+for the latest main-branch SHA, and rebuilds against that SHA. On a
+green build, both `:<short-sha>` and `:rolling` are pushed. On a red
+build, **nothing** is pushed — `:rolling` keeps its previous digest,
+which is the implicit last-known-good state. GHCR is the state store;
+there is no separate tracking file.
 
-A weekly cadence is intentional: the PUA renderer's failure mode is
-graceful (temporary-server falls back to posting raw PUA text when a
-render fails), so we don't need same-day notice of upstream breakage
-the way auth-stack does. Trigger the workflow manually via
-`workflow_dispatch` if you need to test sooner.
+**Smart-skip on schedule:** wynn.tools main is high-velocity, but most
+commits touch pages and components we don't render from (stock/build
+editors, world-events pages, etc.). The daily cron reads the previous
+`:rolling` image's `org.wynnvets.upstream-ref` label and calls the
+GitHub compare API. If nothing changed under our relevant surface —
+`app/lib/**`, `app/components/OgImage/**`, `server/api/_og/**`, or the
+root build config — the build is skipped entirely. Push, PR, and
+`workflow_dispatch` runs always build. If a new import surface enters
+our patches, extend the `patterns=(…)` allowlist in
+`.github/workflows/upstream-track.yml` in the same PR.
 
-When `upstream-smoke` fails:
+When a scheduled build goes red:
+- Inspect the failed run. If `git apply` failed or `pnpm build` failed,
+  regenerate the affected patch — see the "regenerate patches" recipe
+  below.
+- Production keeps running on the previous `:rolling` digest in the
+  meantime; there's no urgent rollback needed. The temporary-server
+  bridge falls back to posting raw PUA text if any render fails
+  regardless, so end-users see slightly-worse output rather than nothing.
 
-1. Read the job log to identify which patch broke (`git apply --check`
-   names the file) or which build error appeared.
-2. Locally regenerate the patch:
-   ```bash
-   git clone https://github.com/wynn-tools/wynn.tools.git /tmp/wt
-   cd /tmp/wt
-   git checkout <new-ref>
-   git apply --reject /path/to/item-renderer/patches/000X-foo.patch
-   # resolve *.rej hunks by hand, then:
-   git add -u
-   git diff --cached > /path/to/item-renderer/patches/000X-foo.patch
-   ```
-3. Bump `ARG WYNN_TOOLS_REF=` in `docker/Dockerfile` to the new SHA.
-4. Open a PR; `verify-patches` will gate it. On merge the same workflow
-   pushes `ghcr.io/wynncraft-veterans/item-renderer:<short-sha>` to GHCR.
-5. Bump `IMAGE_TAG` in `vets-deploy/stacks/item-renderer/.env`, commit,
-   push. On the VPS: `manage sync && manage update item-renderer`.
+When you need to manually pin (e.g. `:rolling` shipped a runtime-bad
+image before it was caught):
+```
+manage pin item-renderer 1a2b3c4      # pin to a specific known-good short SHA
+manage pin item-renderer rolling      # resume auto-tracking
+```
+`manage pin` lives in vets-deploy's `scripts/manage.sh`. It writes
+`IMAGE_TAG` into the stack's `.env` and runs `docker compose pull && up -d`.
+
+The `ARG WYNN_TOOLS_REF` default in [docker/Dockerfile](docker/Dockerfile)
+is only used as the last-resort fallback when the GitHub API call fails
+AND for plain `docker build` invocations without `--build-arg`. CI
+overrides it on every run, so don't expect bumping it to change what
+production runs.
+
+### Regenerating a patch against a broken upstream
+
+```bash
+git clone https://github.com/wynn-tools/wynn.tools.git /tmp/wt
+cd /tmp/wt
+git checkout <upstream-sha-from-failed-run>
+git apply --reject /path/to/item-renderer/patches/000X-foo.patch
+# resolve *.rej hunks by hand, then:
+git add -u
+git diff --cached > /path/to/item-renderer/patches/000X-foo.patch
+```
+Open a PR against item-renderer with the regenerated patch. The
+`upstream-track` workflow's PR run will re-verify against upstream
+main; on merge the main-push run publishes fresh `:<sha>` + `:rolling`
+tags.
 
 ## Don't
 

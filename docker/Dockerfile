@@ -6,16 +6,19 @@
 # holds no upstream code; the build is reproducibly defined by
 # (WYNN_TOOLS_REF, patches/).
 #
-# Build (default = pinned commit):
+# Build (local default = the last-known-good fallback below):
 #   docker build -t item-renderer:local -f docker/Dockerfile .
 #
-# Build against upstream HEAD (nightly smoke / opt-in):
-#   docker build --build-arg WYNN_TOOLS_REF=main \
-#                -t item-renderer:nightly -f docker/Dockerfile .
+# Build against a specific upstream ref:
+#   docker build --build-arg WYNN_TOOLS_REF=<sha-or-branch> \
+#                -t item-renderer:test -f docker/Dockerfile .
 #
-# Bump the pinned ref by editing WYNN_TOOLS_REF below (or pass it from
-# vets-deploy/.env via compose `args`). Upstream wynn.tools has no tagged
-# releases — we pin to a full commit SHA.
+# In CI, .github/workflows/upstream-track.yml overrides WYNN_TOOLS_REF
+# with the latest wynn.tools main-branch SHA (queried from the GitHub
+# API on every schedule/push). The ARG below is only used as the
+# fallback when that API call fails AND when you build locally without
+# --build-arg. Keep it pointing at a ref that's known to apply cleanly.
+# Upstream wynn.tools publishes no tagged releases — we track commit SHAs.
 
 # syntax=docker/dockerfile:1.7-labs
 

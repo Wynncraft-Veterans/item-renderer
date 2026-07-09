@@ -1,0 +1,200 @@
+# Track upstream Wynn-Tools/wynn.tools automatically.
+#
+# Single CI gate for item-renderer. Resolves a target upstream ref
+# (latest wynn.tools main-branch SHA by default — that repo publishes
+# no release tags), builds our patch overlay against it, and on
+# master/schedule publishes two image tags to GHCR:
+#
+#   ghcr.io/wynncraft-veterans/item-renderer:<short-sha>   (immutable, audit)
+#   ghcr.io/wynncraft-veterans/item-renderer:rolling       (mutable, deploy)
+#
+# The vets-deploy item-renderer stack pulls `:rolling`. Watchtower picks
+# up new digests nightly at 04:00, so a successful daily run lands new
+# upstream+patch code within ~24h with no human in the loop.
+#
+# Failure handling is automatic and stateless:
+#  - Build fails  -> no push  -> `:rolling` keeps its previous digest.
+#  - GHCR is the last-known-good record; no separate state file.
+#
+# Smart-skip on schedule: wynn.tools main is high-velocity but most
+# commits touch pages/components we don't render from. On the daily
+# cron only, a preflight step reads the previous `:rolling` image's
+# `org.wynnvets.upstream-ref` label and calls the GitHub compare API to
+# see whether anything changed under the paths our patches import from.
+# If not, the build is skipped entirely — the previous digest stays
+# authoritative. Push, PR, and workflow_dispatch always build.
+#
+# For manual rollback to a specific :<short-sha>, use on the VPS:
+#   manage pin item-renderer <short-sha>
+#
+# To resume auto-tracking after a manual pin:
+#   manage pin item-renderer rolling
+
+name: upstream-track
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 06:00 UTC daily. GitHub disables scheduled workflows after 60 days
+    # of zero repo activity; the push trigger above keeps it warm whenever
+    # we land a patch change.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream ref to build (default: latest main-branch SHA)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve target upstream ref
+        id: resolve
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_REF}" ]; then
+            ref="${INPUT_REF}"
+            echo "Using workflow_dispatch ref: ${ref}"
+          else
+            # wynn.tools has no releases — track main HEAD. Public repo;
+            # GITHUB_TOKEN auth is optional but avoids the 60/hr
+            # unauthenticated rate limit on shared runners.
+            ref=$(curl -fsSL \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "Authorization: Bearer ${GH_TOKEN}" \
+                    https://api.github.com/repos/wynn-tools/wynn.tools/commits/main \
+                  | jq -r .sha)
+            if [ -z "${ref}" ] || [ "${ref}" = "null" ]; then
+              echo "GitHub API returned no sha; falling back to Dockerfile default."
+              ref=$(awk -F'=' '/^ARG WYNN_TOOLS_REF=/{print $2; exit}' docker/Dockerfile)
+            fi
+            echo "Resolved wynn.tools main HEAD: ${ref}"
+          fi
+          # SHAs are hex, no OCI-tag sanitization needed. Short SHA for
+          # the immutable audit tag.
+          tag="${ref:0:7}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      # Log in to GHCR early so both crane (preflight read) and buildx
+      # (later push) can authenticate. Skipped on pull_request where
+      # there's nothing to push and nothing to read from the registry.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install crane (for :rolling label read)
+        if: github.event_name == 'schedule'
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Preflight — skip build if upstream hasn't touched our surface
+        id: preflight
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_REF: ${{ steps.resolve.outputs.ref }}
+        run: |
+          set -euo pipefail
+
+          # Read the previous :rolling image's org.wynnvets.upstream-ref
+          # label. If :rolling doesn't exist yet (first ever run) or the
+          # label is missing, fall through to build.
+          last=$(crane config ghcr.io/${{ github.repository }}:rolling 2>/dev/null \
+                   | jq -r '.config.Labels["org.wynnvets.upstream-ref"] // ""' \
+                   || true)
+          if [ -z "${last}" ]; then
+            echo "No previous :rolling ref label found; will build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${last}" = "${NEW_REF}" ]; then
+            echo "Upstream unchanged since last build (${last}); nothing to do."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Comparing wynn.tools ${last:0:7}..${NEW_REF:0:7}"
+          # If the compare API can't resolve the range (force-push, branch
+          # reset), fall back to rebuilding — safer than skipping.
+          compare=$(gh api "/repos/wynn-tools/wynn.tools/compare/${last}...${NEW_REF}" \
+                      --jq '.files[].filename' 2>/dev/null || echo "__api_error__")
+          if [ "${compare}" = "__api_error__" ]; then
+            echo "Compare API failed; will build (safer)."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Relevant-surface allowlist. Any file matching one of these
+          # patterns triggers a rebuild; anything else is ignored. Kept
+          # narrow to the code our patches touch or import, plus the
+          # root build config that governs the pnpm install/build.
+          #
+          # If we later add imports from a new area of wynn.tools, extend
+          # this list in the same PR.
+          patterns=(
+            '^app/lib/'
+            '^app/components/OgImage/'
+            '^server/api/_og/'
+            '^package\.json$'
+            '^pnpm-lock\.yaml$'
+            '^pnpm-workspace\.yaml$'
+            '^nuxt\.config\.ts$'
+            '^tsconfig.*\.json$'
+            '^\.npmrc$'
+            '^\.node-version$'
+          )
+          relevant=""
+          for pat in "${patterns[@]}"; do
+            match=$(echo "${compare}" | grep -E "${pat}" || true)
+            if [ -n "${match}" ]; then
+              relevant+="${match}"$'\n'
+            fi
+          done
+
+          if [ -z "${relevant}" ]; then
+            echo "No relevant changes in ${last:0:7}..${NEW_REF:0:7}:"
+            echo "${compare}"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Relevant changes detected:"
+            echo "${relevant}"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: github.event_name != 'schedule' || steps.preflight.outputs.should_build != 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (and push on master/schedule/dispatch)
+        if: github.event_name != 'schedule' || steps.preflight.outputs.should_build != 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          build-args: |
+            WYNN_TOOLS_REF=${{ steps.resolve.outputs.ref }}
+          labels: |
+            org.wynnvets.upstream-ref=${{ steps.resolve.outputs.ref }}
+          tags: |
+            ghcr.io/wynncraft-veterans/item-renderer:${{ steps.resolve.outputs.tag }}
+            ghcr.io/wynncraft-veterans/item-renderer:rolling
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
