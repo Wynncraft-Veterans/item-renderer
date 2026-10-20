@@ -52,6 +52,9 @@ for the item encoding:
   display name, `Ascended <name>` / `Masterwork <name>` for ascended
   mythics, generic names for crafted items and mounts, and a reload of the
   item data when the CDN publishes a newer snapshot.
+- `server/plugins/pua-warmup.ts` (0001) — loads that item data and the
+  stat ids at startup, so the first renders after a restart don't spend
+  the bridge's timeout on it.
 - `server/api/_og/pua/[encoded].get.ts` (0001, 0003) — the Nitro route
   that returns the PNG, or a 404 whose `Unknown item: <name>` reason the
   bridge uses in its text fallback.

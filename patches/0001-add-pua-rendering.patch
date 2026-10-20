@@ -1,9 +1,9 @@
 diff --git a/app/lib/wynntils/pua-item.ts b/app/lib/wynntils/pua-item.ts
 new file mode 100644
-index 0000000..4774b67
+index 0000000..7417102
 --- /dev/null
 +++ b/app/lib/wynntils/pua-item.ts
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,113 @@
 +/**
 + * Item lookup for the PUA route: find the base item an Arethusa item string
 + * names, in wynn.tools' item data.
@@ -26,6 +26,7 @@ index 0000000..4774b67
 +const VERSION_CHECK_INTERVAL_MS = 60 * 60 * 1000
 +
 +let itemCache: { gameVersion: string, index: Map<string, SearchItem[]>, checkedAt: number } | null = null
++let loading: Promise<void> | null = null
 +let refreshing: Promise<void> | null = null
 +
 +// A fresh CDN client per load: the client caches every snapshot file it
@@ -45,10 +46,20 @@ index 0000000..4774b67
 +    await loadItems(cdnBaseUrl)
 +}
 +
-+/** The slug index of the item data, loading or refreshing it as needed. */
++/**
++ * The slug index of the item data, loading or refreshing it as needed.
++ * `server/plugins/pua-warmup.ts` calls this at startup, so requests
++ * normally find it loaded.
++ */
 +export async function getItemIndex(cdnBaseUrl: string): Promise<Map<string, SearchItem[]>> {
 +  if (!itemCache) {
-+    await loadItems(cdnBaseUrl)
++    // One load, however many requests arrive while it runs: otherwise a
++    // burst would fetch and parse the whole item data once per request,
++    // under a 256 MB memory cap.
++    loading ??= loadItems(cdnBaseUrl).finally(() => {
++      loading = null
++    })
++    await loading
 +  }
 +  else if (!refreshing && Date.now() - itemCache.checkedAt > VERSION_CHECK_INTERVAL_MS) {
 +    refreshing = reloadIfNewer(cdnBaseUrl, itemCache)
@@ -359,4 +370,25 @@ index 0000000..e63d4a0
 +
 +  setResponseHeader(event, 'content-type', 'image/png')
 +  return Buffer.from(data)
++})
+diff --git a/server/plugins/pua-warmup.ts b/server/plugins/pua-warmup.ts
+new file mode 100644
+index 0000000..0d5b285
+--- /dev/null
++++ b/server/plugins/pua-warmup.ts
+@@ -0,0 +1,15 @@
++/**
++ * Load the PUA route's item data and stat ids when the server starts
++ * rather than on the first render. The load takes seconds, about as long
++ * as the Discord bridge waits for a card, so done lazily it made the
++ * first shares after every restart fall back.
++ */
++
++import { getIdKeys } from '~/lib/wynntils/id-keys'
++import { getItemIndex } from '~/lib/wynntils/pua-item'
++
++export default defineNitroPlugin(() => {
++  const { cdnBaseUrl } = useRuntimeConfig().public
++  Promise.all([getItemIndex(cdnBaseUrl), getIdKeys()])
++    .catch(err => console.warn(`[pua] warm-up failed; the first render will retry: ${(err as Error).message}`))
 +})
