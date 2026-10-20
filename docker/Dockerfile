@@ -63,7 +63,10 @@ RUN set -e; \
 # decoder's `roll` to `value`) would otherwise build green and ship cards
 # with no stats. Upstream itself isn't type-clean, so only errors in our
 # files fail the build, and the --listFiles check makes sure the type
-# check actually reached them.
+# check actually reached them. TypeScript is installed outside the
+# project: inside it, `npx -p typescript tsc` finds upstream's transitive
+# copy under node_modules/.pnpm, counts it as installed, and then has no
+# `tsc` to run, because pnpm only links direct dependencies' binaries.
 #
 # The `pnpm install` flags are minimal because the two policy knobs
 # (`trustPolicy: permissive` and `dangerouslyAllowAllBuilds: true`)
@@ -87,7 +90,8 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     corepack prepare pnpm@11.5.3 --activate; \
     pnpm install --no-frozen-lockfile; \
     pnpm exec nuxt prepare; \
-    npx --yes -p typescript@5.9.3 tsc --noEmit --listFiles -p .nuxt/tsconfig.server.json > /tmp/tsc.log 2>&1 || true; \
+    npm install --prefix /tmp/tsc --no-audit --no-fund --loglevel=error typescript@5.9.3; \
+    /tmp/tsc/node_modules/.bin/tsc --noEmit --listFiles -p .nuxt/tsconfig.server.json > /tmp/tsc.log 2>&1 || true; \
     for f in $(grep '\.ts$' .patched-files); do \
         grep -qF "$f" /tmp/tsc.log || { echo "Type check never reached $f:"; tail -20 /tmp/tsc.log; exit 1; }; \
     done; \

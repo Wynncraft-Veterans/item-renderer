@@ -95,3 +95,30 @@ index 0000000..98943fb
 +    return craftedFallback
 +  }
 +}
+diff --git a/server/api/_og/pua/[encoded].get.ts b/server/api/_og/pua/[encoded].get.ts
+index e63d4a0..ba68e79 100644
+--- a/server/api/_og/pua/[encoded].get.ts
++++ b/server/api/_og/pua/[encoded].get.ts
+@@ -18,6 +18,7 @@ import { findItem, genericName, getItemIndex } from '~/lib/wynntils/pua-item'
+ import { parseIdString } from '~/lib/wynntils/decode'
+ import { getIdKeys } from '~/lib/wynntils/id-keys'
+ import { extractRolledMeta } from '~/lib/wynntils/rolled-to-card'
++import { extractItemNameBestEffort } from '~/lib/wynntils/best-effort-name'
+ 
+ export default defineEventHandler(async (event) => {
+   const encoded = getRouterParam(event, 'encoded')
+@@ -29,6 +30,14 @@ export default defineEventHandler(async (event) => {
+     blocks = parseIdString(encoded)
+   }
+   catch (err) {
++    // Strict decoder throws on unhandled block IDs (crafted-item blocks
++    // 7-15 in particular). Try a lax walker that surfaces just the item
++    // name or crafted type, so the temporary-server bridge can still
++    // format a "__**Name**__ (`<pua>`)" fallback line for Discord.
++    const fallbackName = extractItemNameBestEffort(encoded)
++    if (fallbackName) {
++      throw createError({ statusCode: 404, statusMessage: `Unknown item: ${fallbackName}` })
++    }
+     throw createError({ statusCode: 400, statusMessage: `Decode failed: ${(err as Error).message}` })
+   }
+ 
