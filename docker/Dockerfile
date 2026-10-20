@@ -45,13 +45,25 @@ RUN set -e; \
             git apply --check "$p"; \
             git apply "$p"; \
         done; \
+        # Every file the series adds or changes, for the builder's type check.
+        grep -h '^+++ b/' /patches/*.patch | sed 's|^+++ b/||' | sort -u > .patched-files; \
     else \
         echo "No patches found in /patches/ — building unpatched upstream."; \
+        : > .patched-files; \
     fi
 
 # Stage 2: build the patched Nuxt server.
-# corepack pulls the pnpm version pinned by upstream's packageManager
-# field (if set); otherwise it falls back to the corepack default.
+# pnpm is pinned: upstream sets no packageManager field, and `pnpm@latest`
+# would move to each new major (12.x by 2026-10) without anyone choosing
+# to. 11.5.3 is the version this patch series was last verified with.
+#
+# Before building, type-check every TypeScript file the patches add or
+# change against this upstream ref. `nuxt build` doesn't type-check, so
+# an upstream change our code depends on (Arethusa 3.0.0 renamed the
+# decoder's `roll` to `value`) would otherwise build green and ship cards
+# with no stats. Upstream itself isn't type-clean, so only errors in our
+# files fail the build, and the --listFiles check makes sure the type
+# check actually reached them.
 #
 # The `pnpm install` flags are minimal because the two policy knobs
 # (`trustPolicy: permissive` and `dangerouslyAllowAllBuilds: true`)
@@ -67,10 +79,22 @@ RUN set -e; \
 FROM node:22-alpine AS builder
 WORKDIR /usr/src/app
 COPY --from=source /src .
+# -f: patched paths such as `server/api/_og/pua/[encoded].get.ts` must not
+# glob in the loop below.
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    corepack enable && \
-    corepack prepare pnpm@latest --activate && \
-    pnpm install --no-frozen-lockfile && \
+    set -e -f; \
+    corepack enable; \
+    corepack prepare pnpm@11.5.3 --activate; \
+    pnpm install --no-frozen-lockfile; \
+    pnpm exec nuxt prepare; \
+    npx --yes -p typescript@5.9.3 tsc --noEmit --listFiles -p .nuxt/tsconfig.server.json > /tmp/tsc.log 2>&1 || true; \
+    for f in $(grep '\.ts$' .patched-files); do \
+        grep -qF "$f" /tmp/tsc.log || { echo "Type check never reached $f:"; tail -20 /tmp/tsc.log; exit 1; }; \
+    done; \
+    if grep -F -f .patched-files /tmp/tsc.log | grep 'error TS'; then \
+        echo "Type errors in patched files (above): upstream changed something a patch relies on."; \
+        exit 1; \
+    fi; \
     pnpm build
 
 # Stage 3: minimal runtime. Nitro output is fully self-contained — we only

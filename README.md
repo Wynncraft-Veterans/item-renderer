@@ -29,20 +29,35 @@ it fresh from `wynn-tools/wynn.tools` at a configurable ref.
 2. `patches/*.patch` are applied with `git apply --check` first, then
    `git apply`. Application failure aborts the build with the offending
    patch named in the log.
-3. The `builder` stage runs `pnpm install --frozen-lockfile && pnpm build`
-   to produce the Nitro server output (`.output/`), which embeds the
-   Takumi WASM OG renderer.
+3. The `builder` stage runs `pnpm install` (pnpm pinned in the
+   Dockerfile), type-checks every TypeScript file the patches add or
+   change against that upstream ref, then `pnpm build` to produce the
+   Nitro server output (`.output/`), which embeds the Takumi WASM OG
+   renderer. `nuxt build` alone doesn't type-check, so without step 3 an
+   upstream rename our code relies on builds green and ships broken
+   cards. Upstream isn't type-clean, so only errors in our files count.
 4. The final stage is a minimal `node:22-alpine` image with only the
    `.output/` tree.
 
-The patch series adds:
+The patch series adds, following the
+[Arethusa spec](https://gist.github.com/wenweia/83721cfeeafb92d0cb85466bde7e8738)
+for the item encoding:
 
-- An `app/lib/wynntils/rolled-to-card.ts` mapper — turns a `parseIdString`
-  decode result + base-item lookup into the structured props that
-  `app/components/OgImage/ItemCard.takumi.vue` already accepts.
-- An `app/pages/__og-image__/pua/[encoded].vue` page consumed by
-  `nuxt-og-image`.
-- A `server/api/og/pua/[encoded].get.ts` Nitro route that returns the PNG.
+- `app/lib/wynntils/rolled-to-card.ts` (0001) — turns a `parseIdString`
+  decode result + base item into the props
+  `app/components/OgImage/ItemCard.takumi.vue` already accepts. Current
+  strings carry the value the tooltip shows; legacy ones carry an internal
+  roll that gets rebuilt; spell costs travel sign-flipped in both.
+- `app/lib/wynntils/pua-item.ts` (0001) — finds the base item: by in-game
+  display name, `Ascended <name>` / `Masterwork <name>` for ascended
+  mythics, generic names for crafted items and mounts, and a reload of the
+  item data when the CDN publishes a newer snapshot.
+- `server/api/_og/pua/[encoded].get.ts` (0001, 0003) — the Nitro route
+  that returns the PNG, or a 404 whose `Unknown item: <name>` reason the
+  bridge uses in its text fallback.
+- `app/lib/wynntils/best-effort-name.ts` (0003) — a lax name walker for
+  strings the strict decoder rejects.
+- `pnpm-workspace.yaml` policy knobs (0002) — see the Dockerfile.
 
 The upstream Hono `api/` backend is not used by the sidecar.
 
@@ -51,7 +66,7 @@ The upstream Hono `api/` backend is not used by the sidecar.
 ```bash
 docker build -t item-renderer:local -f docker/Dockerfile .
 docker run --rm -p 3000:3000 item-renderer:local
-# then: GET http://localhost:3000/api/og/pua/<urlencoded-pua-string>
+# then: GET http://localhost:3000/api/_og/pua/<urlencoded-pua-string>
 ```
 
 Or via compose:
@@ -80,14 +95,29 @@ root build config — the build is skipped entirely. Push, PR, and
 our patches, extend the `patterns=(…)` allowlist in
 `.github/workflows/upstream-track.yml` in the same PR.
 
+**Keeping the schedule alive:** GitHub disables a public repo's
+scheduled workflows after 60 days without repository activity, and a
+disabled workflow doesn't run on push or pull requests either. That
+happened on 2026-09-08 and went unnoticed until 2026-10-20, so
+upstream's Arethusa 3.0 decoder (2026-09-20) never reached production
+and nearly every share fell through to the bridge's Wynnpool fallback.
+The workflow's `keepalive` job now re-enables it on every scheduled
+run. If it is ever disabled anyway, the Actions tab says so on the
+`upstream-track` page: click **Enable workflow** (or
+`gh workflow enable upstream-track -R Wynncraft-Veterans/item-renderer`),
+then run it once by hand.
+
 When a scheduled build goes red:
 - Inspect the failed run. If `git apply` failed or `pnpm build` failed,
   regenerate the affected patch — see the "regenerate patches" recipe
-  below.
+  below. If the type check failed, the log names the patched file and
+  the error: upstream changed something that patch relies on, so update
+  it the same way.
 - Production keeps running on the previous `:rolling` digest in the
   meantime; there's no urgent rollback needed. The temporary-server
-  bridge falls back to posting raw PUA text if any render fails
-  regardless, so end-users see slightly-worse output rather than nothing.
+  bridge falls back to a Wynnpool-decoded text card, then to raw PUA
+  text, if any render fails, so end-users see slightly-worse output
+  rather than nothing.
 
 When you need to manually pin (e.g. `:rolling` shipped a runtime-bad
 image before it was caught):
@@ -111,8 +141,8 @@ git clone https://github.com/wynn-tools/wynn.tools.git /tmp/wt
 cd /tmp/wt
 git checkout <upstream-sha-from-failed-run>
 git apply --reject /path/to/item-renderer/patches/000X-foo.patch
-# resolve *.rej hunks by hand, then:
-git add -u
+# resolve *.rej hunks by hand, delete the *.rej files, then:
+git add -A          # -A, not -u: most patches create new files
 git diff --cached > /path/to/item-renderer/patches/000X-foo.patch
 ```
 Open a PR against item-renderer with the regenerated patch. The

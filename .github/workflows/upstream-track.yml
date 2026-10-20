@@ -37,9 +37,9 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # 06:00 UTC daily. GitHub disables scheduled workflows after 60 days
-    # of zero repo activity; the push trigger above keeps it warm whenever
-    # we land a patch change.
+    # 06:00 UTC daily. GitHub disables a public repo's scheduled workflows
+    # after 60 days without repository activity, and a disabled workflow
+    # doesn't run on push either. The `keepalive` job below handles that.
     - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
@@ -49,6 +49,23 @@ on:
         default: ""
 
 jobs:
+  # Patches rarely need to change, so commits alone can't keep the
+  # schedule alive: it was disabled for inactivity on 2026-09-08, twelve
+  # days before upstream shipped the decoder fix this image was waiting
+  # for, and nothing noticed. Re-enabling the workflow through the API
+  # resets the 60-day clock without dummy commits (the same call
+  # gautamkrishnar/keepalive-workflow makes).
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/upstream-track.yml/enable"
+
   build:
     runs-on: ubuntu-latest
     permissions:
